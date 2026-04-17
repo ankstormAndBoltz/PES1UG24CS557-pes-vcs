@@ -177,4 +177,53 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
 
 // object_read — retrieves and verifies data from store
+int object_read(const ObjectID *id, ObjectType *type_out,
+                void **data_out, size_t *len_out) {
+    char path[512];
+    object_path(id, path, sizeof(path));
 
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    uint8_t *buf = malloc(fsize);
+    if (!buf) { fclose(f); return -1; }
+    fread(buf, 1, fsize, f);
+    fclose(f);
+
+    // Verify integrity
+    ObjectID computed;
+    compute_hash(buf, fsize, &computed);
+    if (memcmp(computed.hash, id->hash, HASH_SIZE) != 0) {
+        free(buf); return -1;
+    }
+
+    // Parse header: "type size\0data"
+    uint8_t *null_pos = memchr(buf, '\0', fsize);
+    if (!null_pos) { free(buf); return -1; }
+
+    char header[64];
+    size_t hlen = null_pos - buf;
+    memcpy(header, buf, hlen);
+    header[hlen] = '\0';
+
+    char type_str[16];
+    size_t dlen;
+    sscanf(header, "%15s %zu", type_str, &dlen);
+
+    if      (strcmp(type_str, "blob")   == 0) *type_out = OBJ_BLOB;
+    else if (strcmp(type_str, "tree")   == 0) *type_out = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0) *type_out = OBJ_COMMIT;
+    else { free(buf); return -1; }
+
+    *data_out = malloc(dlen);
+    if (!*data_out) { free(buf); return -1; }
+    memcpy(*data_out, null_pos + 1, dlen);
+    *len_out = dlen;
+
+    free(buf);
+    return 0;
+}

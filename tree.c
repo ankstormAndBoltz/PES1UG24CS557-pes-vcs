@@ -118,7 +118,59 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 
 // Build a tree hierarchy from the current index and write all tree
 // objects to the object store.
-//
+
+static int write_tree_level(IndexEntry *entries, int count,
+                             const char *prefix, ObjectID *id_out) {
+    Tree tree;
+    tree.count = 0;
+
+    int i = 0;
+    while (i < count) {
+        const char *rel = entries[i].path + strlen(prefix);
+        char *slash = strchr(rel, '/');
+
+        if (!slash) {
+            // Direct file entry
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = entries[i].mode;
+            strncpy(e->name, rel, sizeof(e->name) - 1);
+            e->hash = entries[i].hash;
+            i++;
+        } else {
+            // Subdirectory: collect all entries with same first component
+            char subdir[256];
+            size_t dlen = slash - rel;
+            memcpy(subdir, rel, dlen);
+            subdir[dlen] = '\0';
+
+            // Find how many entries share this subdir
+            int j = i;
+            char full_prefix[512];
+            snprintf(full_prefix, sizeof(full_prefix), "%s%s/", prefix, subdir);
+            while (j < count &&
+                   strncmp(entries[j].path, full_prefix, strlen(full_prefix)) == 0)
+                j++;
+
+            // Recurse
+            ObjectID sub_id;
+            if (write_tree_level(entries + i, j - i, full_prefix, &sub_id) != 0)
+                return -1;
+
+            TreeEntry *e = &tree.entries[tree.count++];
+            e->mode = 0040000;
+            strncpy(e->name, subdir, sizeof(e->name) - 1);
+            e->hash = sub_id;
+            i = j;
+        }
+    }
+
+    void *tdata;
+    size_t tlen;
+    if (tree_serialize(&tree, &tdata, &tlen) != 0) return -1;
+    int rc = object_write(OBJ_TREE, tdata, tlen, id_out);
+    free(tdata);
+    return rc;
+}
 // HINTS - Useful functions and concepts for this phase:
 //   - index_load      : load the staged files into memory
 //   - strchr          : find the first '/' in a path to separate directories from files

@@ -97,52 +97,76 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
     const char *type_str = (type == OBJ_BLOB) ? "blob" :
                            (type == OBJ_TREE) ? "tree" : "commit";
 
-    // Build header: "blob 16\0"
+    // 1. Build header: "<type> <size>\0"
     char header[64];
-    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1; // +1 for \0
+    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, len) + 1;
 
-    // Full object = header + data
+    // 2. Combine header + data
     size_t total = hlen + len;
     uint8_t *obj = malloc(total);
     if (!obj) return -1;
+
     memcpy(obj, header, hlen);
     memcpy(obj + hlen, data, len);
 
-    // Hash the full object
+    // 3. Compute hash
     ObjectID id;
     compute_hash(obj, total, &id);
 
-    // Deduplication
+    // 4. Deduplication check
     if (object_exists(&id)) {
         *id_out = id;
         free(obj);
         return 0;
     }
 
-    // Create shard dir
-    char path[512];
-    object_path(&id, path, sizeof(path));
-    char dir[512];
-    snprintf(dir, sizeof(dir), "%s/%.2s", OBJECTS_DIR,
-             path + strlen(OBJECTS_DIR) + 1);
-    mkdir(dir, 0755);
+    // 5. Convert hash to hex
+    char hex[HASH_HEX_SIZE + 1];
+    hash_to_hex(&id, hex);
 
-    // Write to temp file, then rename
+    // 6. Create shard directory: .pes/objects/XX
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/%.2s", OBJECTS_DIR, hex);
+    mkdir(dir, 0755); // safe even if exists
+
+    // 7. Final object path: .pes/objects/XX/YYYY...
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, hex + 2);
+
+    // 8. Temp file path
     char tmp[520];
     snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+    // 9. Write to temp file
     int fd = open(tmp, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (fd < 0) { free(obj); return -1; }
-    write(fd, obj, total);
+    if (fd < 0) {
+        free(obj);
+        return -1;
+    }
+
+    if (write(fd, obj, total) != total) {
+        close(fd);
+        free(obj);
+        return -1;
+    }
+
     fsync(fd);
     close(fd);
     free(obj);
 
-    if (rename(tmp, path) != 0) return -1;
+    // 10. Atomic rename
+    if (rename(tmp, path) != 0) {
+        return -1;
+    }
 
-    // fsync the directory
+    // 11. fsync directory
     int dfd = open(dir, O_RDONLY);
-    if (dfd >= 0) { fsync(dfd); close(dfd); }
+    if (dfd >= 0) {
+        fsync(dfd);
+        close(dfd);
+    }
 
+    // 12. Return object ID
     *id_out = id;
     return 0;
 }
